@@ -68,7 +68,7 @@ def respond(message: str, history: list):
     yield history, _render_contexts(getattr(session, "contexts", None) or [])
 
 
-with gr.Blocks(title="Paper QA", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Paper QA") as demo:
     gr.Markdown(
         "# Paper QA\n"
         "Ask questions against the indexed paper library. "
@@ -76,7 +76,7 @@ with gr.Blocks(title="Paper QA", theme=gr.themes.Soft()) as demo:
     )
     with gr.Row():
         with gr.Column(scale=2):
-            chatbot = gr.Chatbot(type="messages", height=600, label="Conversation")
+            chatbot = gr.Chatbot(height=600, label="Conversation")
             msg = gr.Textbox(
                 placeholder="Ask a question and press Enter...",
                 show_label=False,
@@ -88,7 +88,6 @@ with gr.Blocks(title="Paper QA", theme=gr.themes.Soft()) as demo:
         with gr.Column(scale=1):
             contexts_panel = gr.Markdown(
                 "*Contexts will appear here after the first answer.*",
-                label="Sources",
             )
 
     gr.Examples(
@@ -116,4 +115,9 @@ with gr.Blocks(title="Paper QA", theme=gr.themes.Soft()) as demo:
 
 
 if __name__ == "__main__":
-    demo.queue().launch(server_name="127.0.0.1", server_port=7860, inbrowser=True)
+    demo.queue().launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        inbrowser=True,
+        theme=gr.themes.Soft(),
+    )
