@@ -26,17 +26,13 @@ pip install -r requirements.txt
 
 Drop them into `data/test/` (or change `[paths].paper_dir` in `config.toml`).
 
-Or fetch a paper from a DOI / arXiv id / URL — metadata + PDF are pulled, saved, and the index is updated incrementally:
+Or copy in a single PDF and update the index in one shot:
 
 ```bash
-python src/add.py 2401.12345                        # arXiv id
-python src/add.py 10.1038/s41586-020-2649-2         # DOI (Unpaywall OA lookup)
-python src/add.py https://arxiv.org/abs/2401.12345  # arXiv URL
-python src/add.py https://example.com/paper.pdf     # direct PDF URL
-python src/add.py path/to/local.pdf                 # local file copy
+python src/add.py path/to/local.pdf
+python src/add.py path/to/local.pdf --no-index   # copy only, skip index update
+python src/add.py path/to/local.pdf --overwrite  # replace if same filename exists
 ```
-
-A sidecar `<file>.meta.json` is written alongside each PDF with title / authors / year / source.
 
 ### 2. Build the index
 
@@ -100,7 +96,6 @@ All tunable parameters live in [`config.toml`](config.toml):
 | `[index]` | `recurse_subdirectories` |
 | `[answer]` | `evidence_k`, `answer_max_sources`, `max_concurrent_requests` |
 | `[parsing]` | `multimodal`, `use_doc_details`, `disable_doc_valid_check` |
-| `[network]` | `unpaywall_email` (used by `add.py` for DOI → OA PDF lookup) |
 
 To switch from the 5-PDF test set to the full library, change `paper_dir` to `…/data` (and probably set `recurse_subdirectories = true` if you have nested folders). The index is keyed off `paper_dir`, so a different value triggers a fresh index automatically.
 
@@ -124,7 +119,7 @@ The `log/` folder is gitignored.
 | `start.bat` | One-click launcher for the web UI on Windows |
 | `src/paperqa_config.py` | Loads config, runs health check, builds `Settings`, wires per-run logging |
 | `src/build_index.py` | Builds the search index |
-| `src/add.py` | Add a paper from DOI / arXiv id / URL / local path and update the index |
+| `src/add.py` | Copy a local PDF into the paper directory and update the index |
 | `src/ask.py` | REPL, one-shot, or batch Q&A with optional Markdown report |
 | `src/status.py` | Status report: paths, paper / index stats, LLM health |
 | `src/web.py` | Gradio web UI with sources side panel |
