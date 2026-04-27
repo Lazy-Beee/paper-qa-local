@@ -26,6 +26,18 @@ pip install -r requirements.txt
 
 Drop them into `data/test/` (or change `[paths].paper_dir` in `config.toml`).
 
+Or fetch a paper from a DOI / arXiv id / URL — metadata + PDF are pulled, saved, and the index is updated incrementally:
+
+```bash
+python src/add.py 2401.12345                        # arXiv id
+python src/add.py 10.1038/s41586-020-2649-2         # DOI (Unpaywall OA lookup)
+python src/add.py https://arxiv.org/abs/2401.12345  # arXiv URL
+python src/add.py https://example.com/paper.pdf     # direct PDF URL
+python src/add.py path/to/local.pdf                 # local file copy
+```
+
+A sidecar `<file>.meta.json` is written alongside each PDF with title / authors / year / source.
+
 ### 2. Build the index
 
 ```bash
@@ -42,7 +54,7 @@ Index files land in `data/index/`. Re-running picks up new PDFs without re-proce
 python src/web.py
 ```
 
-Opens a chat interface at `http://127.0.0.1:7860`.
+Opens a chat interface at `http://127.0.0.1:7860` with the cited source snippets in a side panel.
 
 **Terminal REPL:**
 
@@ -56,7 +68,26 @@ python src/ask.py
 python src/ask.py "What is the corrected transport-velocity formulation in SPH?"
 ```
 
-All three entry points run a health check first — if LM Studio is down or a required model is not loaded, you get a clear error before paper-qa starts up.
+**One-shot with Markdown report** (question + answer + references + raw context snippets):
+
+```bash
+python src/ask.py "What is SPH?" --out report.md
+```
+
+**Batch mode** (one question per line, `#` for comments, blank lines skipped):
+
+```bash
+python src/ask.py --batch questions.txt --out answers.md
+```
+
+All entry points run a health check first — if LM Studio is down or a required model is not loaded, you get a clear error before paper-qa starts up.
+
+### 4. Status
+
+```bash
+python src/status.py           # paths, paper count, index size, LLM health
+python src/status.py --json    # machine-readable
+```
 
 ## Configuration
 
@@ -69,6 +100,7 @@ All tunable parameters live in [`config.toml`](config.toml):
 | `[index]` | `recurse_subdirectories` |
 | `[answer]` | `evidence_k`, `answer_max_sources`, `max_concurrent_requests` |
 | `[parsing]` | `multimodal`, `use_doc_details`, `disable_doc_valid_check` |
+| `[network]` | `unpaywall_email` (used by `add.py` for DOI → OA PDF lookup) |
 
 To switch from the 5-PDF test set to the full library, change `paper_dir` to `…/data` (and probably set `recurse_subdirectories = true` if you have nested folders). The index is keyed off `paper_dir`, so a different value triggers a fresh index automatically.
 
@@ -92,8 +124,10 @@ The `log/` folder is gitignored.
 | `start.bat` | One-click launcher for the web UI on Windows |
 | `src/paperqa_config.py` | Loads config, runs health check, builds `Settings`, wires per-run logging |
 | `src/build_index.py` | Builds the search index |
-| `src/ask.py` | REPL or one-shot Q&A |
-| `src/web.py` | Gradio web UI |
+| `src/add.py` | Add a paper from DOI / arXiv id / URL / local path and update the index |
+| `src/ask.py` | REPL, one-shot, or batch Q&A with optional Markdown report |
+| `src/status.py` | Status report: paths, paper / index stats, LLM health |
+| `src/web.py` | Gradio web UI with sources side panel |
 | `data/test/` | PDFs to index *(gitignored)* |
 | `data/index/` | paper-qa index files *(gitignored)* |
 | `log/` | Per-run logs *(gitignored)* |

@@ -27,3 +27,8 @@ max_concurrent_requests = 2
 multimodal = false
 use_doc_details = false
 disable_doc_valid_check = true
+
+[network]
+# Email used as the Unpaywall API contact (required by their TOS).
+# Replace with your own to avoid sharing rate limits with anonymous users.
+unpaywall_email = "anonymous@example.com"
