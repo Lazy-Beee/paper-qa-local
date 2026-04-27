@@ -306,32 +306,63 @@ def _ctx_to_dict(ctx) -> dict:
     name = getattr(text_obj, "name", None) or getattr(ctx, "id", "")
     doc = getattr(text_obj, "doc", None) if text_obj else None
     citation = (getattr(doc, "citation", "") or "").strip() if doc else ""
+    dockey = getattr(doc, "dockey", None) if doc else None
     return {
         "name": str(name),
         "score": getattr(ctx, "score", None),
         "summary": (getattr(ctx, "context", "") or "").strip(),
         "chunk": (getattr(text_obj, "text", "") or "").strip(),
         "citation": citation,
+        # Dockey is a stable per-document id; falling back to citation keeps
+        # historical entries (saved before this field existed) deduping by
+        # the only stable identifier they have.
+        "dockey": str(dockey) if dockey else citation,
     }
 
 
+def _doc_label(group: list[dict]) -> str:
+    """Short label for a doc card: prefer the trimmed chunk name prefix."""
+    name = group[0].get("name") or ""
+    # Chunk names look like "Ihmsen2014 chunk 5" or "Ihmsen2014 pages 1-2".
+    # Strip the per-chunk suffix so the card header names the doc, not a chunk.
+    for sep in (" chunk ", " pages "):
+        if sep in name:
+            return name.split(sep, 1)[0]
+    return name or "(unnamed)"
+
+
 def _render_contexts(contexts) -> str:
-    """Render a list of context dicts (or paper-qa Context objects)."""
+    """Render contexts grouped by source document (dedupes same-doc chunks)."""
     if not contexts:
         return "*No contexts retrieved.*"
     items = [c if isinstance(c, dict) else _ctx_to_dict(c) for c in contexts]
 
-    lines = [f"### Contexts ({len(items)})\n"]
-    for i, item in enumerate(items, 1):
-        name = item.get("name") or f"ctx-{i}"
-        score = item.get("score")
-        score_str = f" — score {score}" if score is not None else ""
-        summary = (item.get("summary") or "").strip()
-        chunk = (item.get("chunk") or "").strip()
-        citation = (item.get("citation") or "").strip()
+    # Group by dockey; preserve first-seen order so the highest-scored doc
+    # (paperqa returns sorted) appears first.
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for item in items:
+        key = item.get("dockey") or item.get("citation") or item.get("name") or ""
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+
+    n_chunks = len(items)
+    n_docs = len(order)
+    lines = [f"### Sources ({n_docs} doc{'s' if n_docs != 1 else ''} · {n_chunks} chunk{'s' if n_chunks != 1 else ''})\n"]
+    for i, key in enumerate(order, 1):
+        group = groups[key]
+        label = _doc_label(group)
+        scores = [g.get("score") for g in group if g.get("score") is not None]
+        best = max(scores) if scores else None
+        best_str = f" — best score {best}" if best is not None else ""
+        chunk_count = len(group)
+        chunk_str = f" · {chunk_count} chunks" if chunk_count > 1 else ""
+        citation = (group[0].get("citation") or "").strip()
 
         lines.append(
-            f"<details><summary><b>{i}. {_html.escape(str(name))}</b>{score_str}</summary>\n"
+            f"<details><summary><b>{i}. {_html.escape(label)}</b>{best_str}{chunk_str}</summary>\n"
         )
         if citation:
             lines.append(
@@ -340,11 +371,24 @@ def _render_contexts(contexts) -> str:
                 "</div>\n"
                 f'<pre class="pqa-citation">{_html.escape(citation)}</pre>\n'
             )
-        if summary:
-            lines.append(f"\n**Summary:** {summary}\n")
-        if chunk:
-            preview = chunk if len(chunk) <= 1500 else chunk[:1500] + "…"
-            lines.append(f"\n```text\n{preview}\n```\n")
+        for j, item in enumerate(group, 1):
+            chunk_name = item.get("name") or ""
+            score = item.get("score")
+            score_str = f" — score {score}" if score is not None else ""
+            summary = (item.get("summary") or "").strip()
+            chunk = (item.get("chunk") or "").strip()
+            heading = (
+                f"\n**Chunk {j}** (`{_html.escape(chunk_name)}`{score_str})\n"
+                if chunk_count > 1
+                else ""
+            )
+            if heading:
+                lines.append(heading)
+            if summary:
+                lines.append(f"\n**Summary:** {summary}\n")
+            if chunk:
+                preview = chunk if len(chunk) <= 1500 else chunk[:1500] + "…"
+                lines.append(f"\n```text\n{preview}\n```\n")
         lines.append("</details>\n")
     return "\n".join(lines)
 

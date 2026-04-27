@@ -20,6 +20,7 @@ from paperqa.settings import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.toml"
+CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "config.example.toml"
 LOG_DIR = PROJECT_ROOT / "log"
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -101,12 +102,15 @@ def health_check() -> None:
 
     available = {m["id"] for m in data.get("data", [])}
     needed = {llm["chat_model"], llm["embedding_model"]}
+    rr = cfg.get("reranker") or {}
+    if rr.get("enabled") and rr.get("model"):
+        needed.add(rr["model"])
     missing = needed - available
     if missing:
         raise RuntimeError(
             f"Endpoint {url} is up but missing model(s): {sorted(missing)}. "
             f"Available: {sorted(available)}. "
-            "Load the missing model(s) in LM Studio or fix [llm] in config.toml."
+            "Load the missing model(s) in LM Studio or fix config.toml."
         )
     print(f"Health check OK: {url}")
 
@@ -128,7 +132,25 @@ def setup_run_log(prefix: str) -> Path:
     return log_path
 
 
+def _ensure_config_exists() -> None:
+    """If config.toml is missing, seed it from config.example.toml.
+
+    Lets a fresh checkout (where config.toml is gitignored) just work
+    instead of crashing on first run.
+    """
+    if CONFIG_PATH.exists():
+        return
+    if not CONFIG_EXAMPLE_PATH.exists():
+        raise FileNotFoundError(
+            f"Neither {CONFIG_PATH} nor {CONFIG_EXAMPLE_PATH} exists. "
+            "Restore one of them to proceed."
+        )
+    CONFIG_PATH.write_bytes(CONFIG_EXAMPLE_PATH.read_bytes())
+    print(f"Created {CONFIG_PATH.name} from {CONFIG_EXAMPLE_PATH.name} (edit to customize).")
+
+
 def load_config() -> dict:
+    _ensure_config_exists()
     with CONFIG_PATH.open("rb") as f:
         return tomllib.load(f)
 
@@ -141,6 +163,78 @@ def _resolve_path(p: str) -> str:
     return str(path.resolve())
 
 
+_RERANK_PATCHED = False
+
+
+def _install_reranker_patch(cfg: dict) -> None:
+    """Monkey-patch Docs.retrieve_texts to oversample then cross-encoder rerank.
+
+    Idempotent: only patches once per process. Reads the current [reranker]
+    section every call so config changes (enable/disable, oversample) take
+    effect on the next retrieval without a restart.
+    """
+    global _RERANK_PATCHED
+
+    from paperqa.docs import Docs
+
+    from reranker import RerankerConfig, rerank_scores
+
+    def _build_cfg() -> RerankerConfig | None:
+        rr = (load_config().get("reranker") or {})
+        if not rr.get("enabled"):
+            return None
+        llm = load_config()["llm"]
+        return RerankerConfig(
+            enabled=True,
+            model=rr["model"],
+            api_base=llm["api_base"],
+            api_key=llm["api_key"],
+            oversample=int(rr.get("oversample", 3)),
+            max_concurrent_requests=int(rr.get("max_concurrent_requests", 8)),
+            instruct=rr.get("instruct", "Given a search query, retrieve relevant passages."),
+        )
+
+    if _RERANK_PATCHED:
+        return
+
+    original = Docs.retrieve_texts
+
+    async def patched(self, query, k, settings=None, embedding_model=None,
+                      partitioning_fn=None):
+        rcfg = _build_cfg()
+        if rcfg is None or rcfg.oversample <= 1:
+            return await original(self, query, k, settings, embedding_model,
+                                  partitioning_fn)
+
+        fetch_k = max(k, k * rcfg.oversample)
+        candidates = await original(self, query, fetch_k, settings,
+                                    embedding_model, partitioning_fn)
+        if len(candidates) <= k:
+            return candidates
+
+        docs = [c.text for c in candidates]
+        try:
+            scores = await rerank_scores(rcfg, query, docs)
+        except Exception as e:
+            print(f"Reranker failed ({e}); falling back to embedding order.")
+            return candidates[:k]
+
+        # Stable sort by -score, preserving original embedding order on ties.
+        indexed = sorted(
+            range(len(candidates)),
+            key=lambda i: (-scores[i], i),
+        )
+        kept = [candidates[i] for i in indexed[:k]]
+        kept_yes = sum(1 for i in indexed[:k] if scores[i] >= 1.0)
+        print(f"Reranker: {len(candidates)} candidates → kept {len(kept)} "
+              f"(yes={kept_yes}, model={rcfg.model})")
+        return kept
+
+    Docs.retrieve_texts = patched
+    _RERANK_PATCHED = True
+    print("Reranker patch installed on paperqa.docs.Docs.retrieve_texts")
+
+
 def make_settings(rebuild_index: bool) -> Settings:
     cfg = load_config()
     llm = cfg["llm"]
@@ -148,6 +242,7 @@ def make_settings(rebuild_index: bool) -> Settings:
     index_cfg = cfg["index"]
     answer_cfg = cfg["answer"]
     parsing_cfg = cfg["parsing"]
+    _install_reranker_patch(cfg)
 
     os.environ["OPENAI_API_KEY"] = llm["api_key"]
     os.environ["OPENAI_BASE_URL"] = llm["api_base"]

@@ -18,6 +18,10 @@ data/
 log/
 *.log
 
+# Local config (copy from config.example.toml; contains user-specific
+# paths, model choices, and endpoint credentials)
+config.toml
+
 # OS / IDE
 .DS_Store
 Thumbs.db
