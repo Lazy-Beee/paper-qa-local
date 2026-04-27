@@ -1,0 +1,29 @@
+[paths]
+# Paths are resolved relative to the project root unless absolute.
+paper_dir = "data/test"
+index_dir = "data/index"
+
+[llm]
+# OpenAI-compatible endpoint (LM Studio, vLLM, Ollama, etc.)
+api_base = "http://localhost:1234/v1"
+api_key = "lm-studio"
+
+# Model used for chat / summary / agent / enrichment
+chat_model = "qwen2.5-14b-instruct-1m"
+
+# Embedding model. `embedding_alias` is the name paper-qa references.
+embedding_model = "text-embedding-qwen3-embedding-4b"
+embedding_alias = "lmstudio-embedding"
+
+[index]
+recurse_subdirectories = false
+
+[answer]
+evidence_k = 10
+answer_max_sources = 5
+max_concurrent_requests = 2
+
+[parsing]
+multimodal = false
+use_doc_details = false
+disable_doc_valid_check = true

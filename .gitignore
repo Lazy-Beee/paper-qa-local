@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# paper-qa index cache
+.pqa/
+indexes/
+
+# PDF literature (not tracked in git — too large, copyright)
+data/
+*.pdf
+
+# Logs
+log/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Claude Code project-local notes (session summaries, etc.)
+.claude/
