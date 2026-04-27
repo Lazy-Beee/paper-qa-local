@@ -6,11 +6,10 @@ Local literature Q&A backed by [paper-qa](https://github.com/Future-House/paper-
 
 - Python 3.11+ (uses `tomllib` from stdlib)
 - An OpenAI-compatible LLM server running locally. Default config targets [LM Studio](https://lmstudio.ai/) at `http://localhost:1234`.
-- Two models loaded on that server:
-  - chat: `qwen2.5-14b-instruct-1m`
+- Three models loaded on that server (all configurable in `config.toml`):
+  - chat: `qwen2.5-14b-instruct`
   - embedding: `text-embedding-qwen3-embedding-4b`
-
-  (Both names are configurable in `config.toml`.)
+  - reranker: `qwen3-reranker-0.6b` *(optional — set `[reranker].enabled = false` to skip)*
 
 ## Setup
 
@@ -20,11 +19,19 @@ source .venv/Scripts/activate    # Windows bash; use Activate.ps1 for PowerShell
 pip install -r requirements.txt
 ```
 
+Copy the config template (or just run any entry point and it auto-seeds on first launch):
+
+```bash
+cp config.example.toml config.toml
+```
+
+`config.toml` is gitignored — keep your local model names, paths, and endpoint there.
+
 ## Usage
 
 ### 1. Add PDFs
 
-Drop them into `data/test/` (or change `[paths].paper_dir` in `config.toml`).
+Drop them into `data/` (or change `[paths].paper_dir` in `config.toml` — the web UI also has an inline editor for this).
 
 Or copy in a single PDF and update the index in one shot:
 
@@ -50,7 +57,7 @@ Index files land in `data/index/`. Re-running picks up new PDFs without re-proce
 python src/web.py
 ```
 
-Opens a chat interface at `http://127.0.0.1:7860` with the cited source snippets in a side panel.
+Opens a chat interface at `http://127.0.0.1:7860`. Side panel shows the source snippets used in the answer, grouped by paper and with a click-to-copy citation block. Past conversations are loadable from the History dropdown.
 
 **Terminal REPL:**
 
@@ -87,7 +94,7 @@ python src/status.py --json    # machine-readable
 
 ## Configuration
 
-All tunable parameters live in [`config.toml`](config.toml):
+All tunable parameters live in `config.toml` (template: [`config.example.toml`](config.example.toml)):
 
 | Section | Knobs |
 |---------|-------|
@@ -95,9 +102,16 @@ All tunable parameters live in [`config.toml`](config.toml):
 | `[llm]` | `api_base`, `api_key`, `chat_model`, `embedding_model`, `embedding_alias` |
 | `[index]` | `recurse_subdirectories` |
 | `[answer]` | `evidence_k`, `answer_max_sources`, `max_concurrent_requests` |
+| `[reranker]` | `enabled`, `model`, `oversample`, `max_concurrent_requests`, `instruct` |
 | `[parsing]` | `multimodal`, `use_doc_details`, `disable_doc_valid_check` |
 
-To switch from the 5-PDF test set to the full library, change `paper_dir` to `…/data` (and probably set `recurse_subdirectories = true` if you have nested folders). The index is keyed off `paper_dir`, so a different value triggers a fresh index automatically.
+The index is keyed off `paper_dir`, so changing it triggers a fresh index automatically. Set `recurse_subdirectories = true` if you keep PDFs in nested folders.
+
+### Reranker
+
+After embedding retrieval pulls `evidence_k * oversample` candidates, a Qwen3-style cross-encoder reranker scores each (`query`, `chunk`) pair as yes/no, and the top `evidence_k` survivors go to the LLM summary stage. This lets you cast a wide net during retrieval (less likely to miss the right chunk) without paying for LLM summaries on noise.
+
+LM Studio currently does not return token logprobs for these models, so scoring is binary; original embedding order is the tiebreaker. Disable with `[reranker].enabled = false` if you don't have the model loaded.
 
 ## Logs
 
@@ -114,16 +128,18 @@ The `log/` folder is gitignored.
 
 | Path | Purpose |
 |------|---------|
-| `config.toml` | All tunable parameters |
+| `config.example.toml` | Tracked config template |
+| `config.toml` | Local config — auto-seeded from the example *(gitignored)* |
 | `requirements.txt` | Python dependencies |
 | `start.bat` | One-click launcher for the web UI on Windows |
-| `src/paperqa_config.py` | Loads config, runs health check, builds `Settings`, wires per-run logging |
+| `src/paperqa_config.py` | Loads config, runs health check, builds `Settings`, installs the reranker patch, wires per-run logging |
+| `src/reranker.py` | OpenAI-compatible client for the Qwen3-style reranker |
 | `src/build_index.py` | Builds the search index |
 | `src/add.py` | Copy a local PDF into the paper directory and update the index |
 | `src/ask.py` | REPL, one-shot, or batch Q&A with optional Markdown report |
 | `src/status.py` | Status report: paths, paper / index stats, LLM health |
 | `src/web.py` | Gradio web UI with sources side panel |
-| `data/test/` | PDFs to index *(gitignored)* |
+| `data/` | PDFs to index *(gitignored)* |
 | `data/index/` | paper-qa index files *(gitignored)* |
 | `log/` | Per-run logs *(gitignored)* |
 
