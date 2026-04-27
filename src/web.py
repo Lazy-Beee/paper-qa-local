@@ -12,8 +12,11 @@ so it can be recalled later from the History dropdown.
 """
 import asyncio
 import datetime
+import html as _html
 import json
+import re
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -24,6 +27,7 @@ import gradio as gr
 from paperqa import ask
 
 from paperqa_config import (
+    CONFIG_PATH,
     LOG_DIR,
     _resolve_path,
     health_check,
@@ -41,6 +45,58 @@ settings = make_settings(rebuild_index=False)
 HISTORY_PATH = LOG_DIR / "conversations.jsonl"
 EMPTY_CONTEXTS_MSG = "*Contexts will appear here after the first answer.*"
 HISTORY_LABEL_MAX = 70
+
+LATEX_DELIMS = [
+    {"left": "$$", "right": "$$", "display": True},
+    {"left": "\\[", "right": "\\]", "display": True},
+    {"left": "\\(", "right": "\\)", "display": False},
+    {"left": "$", "right": "$", "display": False},
+]
+
+PAGE_CSS = """
+.gradio-container,
+.gradio-container *:not(pre):not(code):not(.pqa-citation) {
+    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+}
+.pqa-citation {
+    user-select: all;
+    cursor: copy;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: Arial, "Helvetica Neue", sans-serif;
+    font-size: 0.92em;
+    margin: 4px 0 8px 0;
+    line-height: 1.4;
+}
+.pqa-citation:hover { background: rgba(0, 0, 0, 0.08); }
+.pqa-citation-label {
+    font-weight: 600;
+    margin-top: 6px;
+    font-size: 0.95em;
+}
+.pqa-citation-hint {
+    font-weight: 400;
+    font-size: 0.82em;
+    opacity: 0.7;
+    margin-left: 6px;
+}
+.pqa-stats {
+    font-size: 0.82em;
+    opacity: 0.65;
+    font-style: italic;
+    margin: 0 4px 4px 4px;
+    padding: 0;
+    line-height: 1.2;
+    min-height: 0;
+}
+.pqa-stats p { margin: 0; }
+.pqa-contexts details { margin-bottom: 14px; }
+.pqa-contexts details:last-of-type { margin-bottom: 0; }
+"""
 
 
 # --- Library counts -------------------------------------------------------
@@ -85,6 +141,55 @@ def _render_library() -> str:
     return "\n".join(lines)
 
 
+# --- Paper directory editing ---------------------------------------------
+
+
+def _initial_paper_dir() -> str:
+    return load_config()["paths"]["paper_dir"]
+
+
+def _write_paper_dir_to_config(new_path: str) -> None:
+    """Replace the paper_dir line in config.toml, preserving comments and line endings."""
+    import re
+
+    safe_path = new_path.replace("\\", "/")
+    text = CONFIG_PATH.read_bytes().decode("utf-8")
+    new_text, n = re.subn(
+        r'^(\s*paper_dir\s*=\s*)"[^"]*"',
+        lambda m: m.group(1) + f'"{safe_path}"',
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        raise ValueError("paper_dir line not found in [paths] section of config.toml")
+    CONFIG_PATH.write_bytes(new_text.encode("utf-8"))
+
+
+def change_paper_dir_handler(new_path: str):
+    global settings
+    new_path = (new_path or "").strip()
+    if not new_path:
+        return "*Path cannot be empty.*", _render_library()
+
+    resolved = Path(_resolve_path(new_path))
+    if not resolved.exists():
+        return f"*Path does not exist: `{resolved}`*", _render_library()
+    if not resolved.is_dir():
+        return f"*Not a directory: `{resolved}`*", _render_library()
+
+    try:
+        _write_paper_dir_to_config(new_path)
+    except Exception as e:
+        return f"*Failed to write config.toml: {e}*", _render_library()
+
+    settings = make_settings(rebuild_index=False)
+    return (
+        f"*Switched to `{resolved}`. Click **Update index** to (re)build the index for this folder.*",
+        _render_library(),
+    )
+
+
 # --- Index build ----------------------------------------------------------
 
 
@@ -107,16 +212,26 @@ def update_index_handler():
 # --- Conversation history -------------------------------------------------
 
 
-def _append_history(question: str, answer: str) -> None:
+def _append_history(
+    question: str,
+    answer: str,
+    contexts: list[dict] | None = None,
+    stats: str = "",
+) -> None:
     entry = {
         "id": str(uuid.uuid4()),
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
         "question": question,
         "answer": answer,
+        "contexts": contexts or [],
+        "stats": stats,
     }
     HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with HISTORY_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+_INLINE_STATS_RE = re.compile(r"\n\n---\n_(.+?)_\s*$", re.DOTALL)
 
 
 def _load_history() -> list[dict]:
@@ -124,11 +239,22 @@ def _load_history() -> list[dict]:
         return []
     entries = []
     for line in HISTORY_PATH.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Backward-compat: older entries embedded the stats line as a footer
+        # inside `answer`. Split it out into the new `stats` field on read so
+        # both flows render the same way.
+        if not e.get("stats"):
+            ans = e.get("answer", "")
+            m = _INLINE_STATS_RE.search(ans)
+            if m:
+                e["stats"] = m.group(1).strip()
+                e["answer"] = ans[: m.start()]
+        entries.append(e)
     return entries
 
 
@@ -151,32 +277,69 @@ def refresh_history_handler():
 
 def load_history_handler(entry_id):
     if not entry_id:
-        return [], EMPTY_CONTEXTS_MSG
+        return [], EMPTY_CONTEXTS_MSG, ""
     for e in _load_history():
         if e.get("id") == entry_id:
             history = [
                 {"role": "user", "content": e.get("question", "")},
                 {"role": "assistant", "content": e.get("answer", "")},
             ]
-            return history, "*Loaded from history — contexts are not stored.*"
-    return [], "*Entry not found.*"
+            saved_contexts = e.get("contexts") or []
+            stats = e.get("stats") or ""
+            if saved_contexts:
+                return history, _render_contexts(saved_contexts), stats
+            return (
+                history,
+                "*Loaded from history — no contexts were saved with this entry "
+                "(it predates context persistence).*",
+                stats,
+            )
+    return [], "*Entry not found.*", ""
 
 
 # --- Contexts rendering ---------------------------------------------------
 
 
+def _ctx_to_dict(ctx) -> dict:
+    """Pluck the fields _render_contexts shows from a paper-qa Context."""
+    text_obj = getattr(ctx, "text", None)
+    name = getattr(text_obj, "name", None) or getattr(ctx, "id", "")
+    doc = getattr(text_obj, "doc", None) if text_obj else None
+    citation = (getattr(doc, "citation", "") or "").strip() if doc else ""
+    return {
+        "name": str(name),
+        "score": getattr(ctx, "score", None),
+        "summary": (getattr(ctx, "context", "") or "").strip(),
+        "chunk": (getattr(text_obj, "text", "") or "").strip(),
+        "citation": citation,
+    }
+
+
 def _render_contexts(contexts) -> str:
+    """Render a list of context dicts (or paper-qa Context objects)."""
     if not contexts:
         return "*No contexts retrieved.*"
-    lines = [f"### Contexts ({len(contexts)})\n"]
-    for i, ctx in enumerate(contexts, 1):
-        text_obj = getattr(ctx, "text", None)
-        name = getattr(text_obj, "name", None) or getattr(ctx, "id", f"ctx-{i}")
-        score = getattr(ctx, "score", None)
+    items = [c if isinstance(c, dict) else _ctx_to_dict(c) for c in contexts]
+
+    lines = [f"### Contexts ({len(items)})\n"]
+    for i, item in enumerate(items, 1):
+        name = item.get("name") or f"ctx-{i}"
+        score = item.get("score")
         score_str = f" — score {score}" if score is not None else ""
-        summary = (getattr(ctx, "context", "") or "").strip()
-        chunk = (getattr(text_obj, "text", "") or "").strip()
-        lines.append(f"<details><summary><b>{i}. {name}</b>{score_str}</summary>\n")
+        summary = (item.get("summary") or "").strip()
+        chunk = (item.get("chunk") or "").strip()
+        citation = (item.get("citation") or "").strip()
+
+        lines.append(
+            f"<details><summary><b>{i}. {_html.escape(str(name))}</b>{score_str}</summary>\n"
+        )
+        if citation:
+            lines.append(
+                '<div class="pqa-citation-label">Citation'
+                '<span class="pqa-citation-hint">(click to select, Ctrl+C to copy)</span>'
+                "</div>\n"
+                f'<pre class="pqa-citation">{_html.escape(citation)}</pre>\n'
+            )
         if summary:
             lines.append(f"\n**Summary:** {summary}\n")
         if chunk:
@@ -186,35 +349,69 @@ def _render_contexts(contexts) -> str:
     return "\n".join(lines)
 
 
+# --- Stats footer ---------------------------------------------------------
+
+
+def _format_stats(elapsed_s: float, session) -> str:
+    """One-line summary appended below an answer: time + token totals."""
+    parts = [f"{elapsed_s:.1f}s"]
+    tokens = getattr(session, "token_counts", None) or {}
+    total_p = total_c = 0
+    for vals in tokens.values():
+        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+            try:
+                total_p += int(vals[0])
+                total_c += int(vals[1])
+            except (TypeError, ValueError):
+                continue
+    if total_p or total_c:
+        parts.append(
+            f"prompt {total_p:,} + completion {total_c:,} = {total_p + total_c:,} tokens"
+        )
+    cost = getattr(session, "cost", None)
+    try:
+        if cost and float(cost) > 0:
+            parts.append(f"${float(cost):.4f}")
+    except (TypeError, ValueError):
+        pass
+    return " · ".join(parts)
+
+
 # --- Chat handler ---------------------------------------------------------
 
 
 def respond(message: str, history: list):
     if not message.strip():
-        yield history, "*Enter a question first.*"
+        yield history, "*Enter a question first.*", ""
         return
 
     history = list(history) + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": "Searching the library..."},
     ]
-    yield history, "*Working...*"
+    yield history, "*Working...*", ""
 
+    start = time.perf_counter()
     try:
         response = ask(message, settings=settings)
     except Exception as e:
+        elapsed = time.perf_counter() - start
         history[-1] = {"role": "assistant", "content": f"**Error:** {e}"}
-        yield history, "*Failed.*"
+        yield history, "*Failed.*", f"{elapsed:.1f}s (failed)"
         return
+    elapsed = time.perf_counter() - start
 
     session = response.session
     answer_text = session.answer or session.formatted_answer or "(empty answer)"
+    stats = _format_stats(elapsed, session)
     history[-1] = {"role": "assistant", "content": answer_text}
+    contexts = getattr(session, "contexts", None) or []
+    ctx_dicts = [_ctx_to_dict(c) for c in contexts]
     try:
-        _append_history(message, answer_text)
+        _append_history(message, answer_text, ctx_dicts, stats)
     except Exception as e:
         print(f"Failed to append history: {e}")
-    yield history, _render_contexts(getattr(session, "contexts", None) or [])
+    yield history, _render_contexts(ctx_dicts), stats
 
 
 # --- UI -------------------------------------------------------------------
@@ -231,11 +428,18 @@ with gr.Blocks(title="Paper QA") as demo:
     with gr.Accordion("Library & history", open=True):
         with gr.Row():
             with gr.Column():
-                library_md = gr.Markdown(_render_library())
-                build_status = gr.Markdown("")
+                paper_dir_input = gr.Textbox(
+                    value=_initial_paper_dir(),
+                    label="Paper directory (relative to project root, or absolute)",
+                    interactive=True,
+                )
                 with gr.Row():
+                    apply_dir_btn = gr.Button("Apply path")
                     refresh_lib_btn = gr.Button("Refresh counts")
                     update_idx_btn = gr.Button("Update index", variant="primary")
+                dir_status = gr.Markdown("")
+                library_md = gr.Markdown(_render_library())
+                build_status = gr.Markdown("")
             with gr.Column():
                 history_dd = gr.Dropdown(
                     choices=_history_choices(),
@@ -249,7 +453,13 @@ with gr.Blocks(title="Paper QA") as demo:
 
     with gr.Row():
         with gr.Column(scale=2):
-            chatbot = gr.Chatbot(height=600, label="Conversation")
+            chatbot = gr.Chatbot(
+                min_height=200,
+                max_height=600,
+                label="Conversation",
+                latex_delimiters=LATEX_DELIMS,
+            )
+            stats_md = gr.Markdown("", elem_classes=["pqa-stats"])
             msg = gr.Textbox(
                 placeholder="Ask a question and press Enter...",
                 show_label=False,
@@ -259,7 +469,11 @@ with gr.Blocks(title="Paper QA") as demo:
                 submit_btn = gr.Button("Submit", variant="primary")
                 clear_btn = gr.Button("Clear")
         with gr.Column(scale=1):
-            contexts_panel = gr.Markdown(EMPTY_CONTEXTS_MSG)
+            contexts_panel = gr.Markdown(
+                EMPTY_CONTEXTS_MSG,
+                latex_delimiters=LATEX_DELIMS,
+                elem_classes=["pqa-contexts"],
+            )
 
     gr.Examples(
         examples=[
@@ -274,20 +488,25 @@ with gr.Blocks(title="Paper QA") as demo:
         yield from respond(message, history)
 
     def _clear():
-        return [], "", EMPTY_CONTEXTS_MSG
+        return [], "", EMPTY_CONTEXTS_MSG, ""
 
-    msg.submit(_submit, [msg, chatbot], [chatbot, contexts_panel]).then(
-        lambda: "", None, msg
-    ).then(refresh_history_handler, None, history_dd)
-    submit_btn.click(_submit, [msg, chatbot], [chatbot, contexts_panel]).then(
-        lambda: "", None, msg
-    ).then(refresh_history_handler, None, history_dd)
-    clear_btn.click(_clear, None, [chatbot, msg, contexts_panel])
+    msg.submit(
+        _submit, [msg, chatbot], [chatbot, contexts_panel, stats_md]
+    ).then(lambda: "", None, msg).then(refresh_history_handler, None, history_dd)
+    submit_btn.click(
+        _submit, [msg, chatbot], [chatbot, contexts_panel, stats_md]
+    ).then(lambda: "", None, msg).then(refresh_history_handler, None, history_dd)
+    clear_btn.click(_clear, None, [chatbot, msg, contexts_panel, stats_md])
 
+    apply_dir_btn.click(
+        change_paper_dir_handler, paper_dir_input, [dir_status, library_md]
+    )
     refresh_lib_btn.click(_render_library, None, library_md)
     update_idx_btn.click(update_index_handler, None, [build_status, library_md])
     refresh_hist_btn.click(refresh_history_handler, None, history_dd)
-    load_hist_btn.click(load_history_handler, history_dd, [chatbot, contexts_panel])
+    load_hist_btn.click(
+        load_history_handler, history_dd, [chatbot, contexts_panel, stats_md]
+    )
 
 
 if __name__ == "__main__":
@@ -295,5 +514,6 @@ if __name__ == "__main__":
         server_name="127.0.0.1",
         server_port=7860,
         inbrowser=True,
-        theme=gr.themes.Soft(),
+        theme=gr.themes.Soft(font=["Arial", "Helvetica Neue", "sans-serif"]),
+        css=PAGE_CSS,
     )

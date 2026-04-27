@@ -1,7 +1,9 @@
 """Load config.toml and build a paper-qa Settings object."""
 import datetime
 import json
+import logging
 import os
+import re
 import sys
 import tomllib
 import urllib.error
@@ -20,21 +22,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.toml"
 LOG_DIR = PROJECT_ROOT / "log"
 
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
 
 class _Tee:
     """Forward writes to multiple streams (e.g. terminal + log file).
 
+    The first stream receives raw data so an interactive terminal still
+    shows ANSI colors. Subsequent streams (log files) receive data with
+    ANSI escape sequences stripped, keeping log files readable.
+
     Unknown attributes (isatty, fileno, encoding, ...) fall through to the
-    first stream so libraries that introspect the stream still work.
+    first stream so libraries that introspect the stream still work
+    (e.g. Rich detects TTY via the terminal stream and emits colors,
+    which we then strip on the way to the file).
     """
 
     def __init__(self, *streams):
         self.streams = streams
 
     def write(self, data):
-        for s in self.streams:
-            s.write(data)
-            s.flush()
+        if not self.streams:
+            return
+        self.streams[0].write(data)
+        self.streams[0].flush()
+        if len(self.streams) > 1:
+            stripped = ANSI_ESCAPE_RE.sub("", data)
+            for s in self.streams[1:]:
+                s.write(stripped)
+                s.flush()
 
     def flush(self):
         for s in self.streams:
@@ -42,6 +58,28 @@ class _Tee:
 
     def __getattr__(self, name):
         return getattr(self.streams[0], name)
+
+
+class _DropPatternFilter(logging.Filter):
+    """Drop log records whose message contains any of the given substrings."""
+
+    def __init__(self, *needles: str) -> None:
+        super().__init__()
+        self._needles = needles
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return not any(n in msg for n in self._needles)
+
+
+def _silence_litellm_noise() -> None:
+    """Suppress repetitive litellm warnings that have no actionable content."""
+    logging.getLogger("LiteLLM").addFilter(
+        _DropPatternFilter("MAX_CALLBACKS")
+    )
 
 
 def health_check() -> None:
@@ -74,13 +112,19 @@ def health_check() -> None:
 
 
 def setup_run_log(prefix: str) -> Path:
-    """Create log/<prefix>_<timestamp>.log and tee stdout/stderr to it."""
+    """Create log/<prefix>_<timestamp>.log and tee stdout/stderr to it.
+
+    Also installs a logging filter that drops noisy litellm callback
+    warnings. The filter is attached by logger name, so it remains
+    effective regardless of when litellm imports its verbose_logger.
+    """
     LOG_DIR.mkdir(exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = LOG_DIR / f"{prefix}_{timestamp}.log"
-    log_file = log_path.open("w", encoding="utf-8")
+    log_file = log_path.open("w", encoding="utf-8", buffering=1)
     sys.stdout = _Tee(sys.stdout, log_file)
     sys.stderr = _Tee(sys.stderr, log_file)
+    _silence_litellm_noise()
     return log_path
 
 
